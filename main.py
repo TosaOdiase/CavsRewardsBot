@@ -25,7 +25,7 @@ def load_proxies(csv_file):
 
 
 def run(playwright: Playwright, proxy: dict) -> None:
-    browser = playwright.chromium.launch(headless=False, proxy=proxy)
+    browser = playwright.chromium.launch(headless=False)
     context = browser.new_context()
     page = context.new_page()
 
@@ -45,10 +45,16 @@ def run(playwright: Playwright, proxy: dict) -> None:
     time.sleep(1.5)
     page.get_by_role("button", name="Continue", exact=True).click()
     time.sleep(1.5)
+    page.get_by_role("button", name="Continue", exact=True).click()
+    time.sleep(1.5)
+    page.get_by_role("button", name="Continue", exact=True).click()
+    time.sleep(1.5)
+    page.get_by_role("button", name="Continue", exact=True).click()
+    time.sleep(1.5)
     page.get_by_role("button", name="GET STARTED").click()
     time.sleep(1.5)
     page.get_by_text("By clicking \"Done\", you agree to our Terms of Use Continue").click()
-    time.sleep(5)
+    time.sleep(50000000000)
 
 
     # Close context and browser
@@ -84,7 +90,7 @@ def get_activation_link(email_address, email_password):
 def threaded_run():
     proxies = load_proxies("proxies.csv")
     with sync_playwright() as playwright:
-        for _ in range(8):  # Number of runs (adjust as needed)
+        for _ in range(2):  # Number of runs (adjust as needed)
             try:
                 proxy = random.choice(proxies)  # Randomly select a proxy
                 run(playwright, proxy)
