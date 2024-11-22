@@ -17,7 +17,7 @@ def generate_random_receipt():
     random_date = (datetime.now() - timedelta(days=random.randint(0, 15))).strftime("%m/%d/%y %H:%M:%S")
 
     # Generate random AMEX last 4 digits
-    amex_number = escape_latex(f"AMEX **** **** **** {random.randint(1000, 9999)}")
+    amex_number = escape_latex(f"{random.randint(1000, 9999)}")
 
     return tc_number, st_number, random_date, amex_number
 
@@ -33,49 +33,48 @@ def create_receipt_latex(tc_number, st_number, random_date, amex_number):
 \usepackage{array}
 \usepackage{graphicx}
 \usepackage{multicol}
-\usepackage{xcolor}
+\usepackage{xcolor} % For setting background color
 \pagecolor{white} % Ensure white background
 
 \begin{document}
 \pagestyle{empty}
 
+
 \begin{center}
     \includegraphics[width=\linewidth]{Header.png}
     \textbf{WAL*MART}\\
-    TBD Mgr. TBD\\
-    905 SINGLETARY DR\\
-    STREETSBORO, OH\\
-    """ + st_number + r"""\\
+    \textbf{33062990 Mgr. MIRANDA}\\
+    \textbf{905 SINGLETARY DR}\\
+    \textbf{STREETSBORO, OH}\\
+    \textbf{""" + st_number + r"""}\\
     \vspace{10pt}
 
     \begin{tabbing}
         \hspace{2cm} \= \hspace{3cm} \= \kill
-        FANTA \> 004900003073 F \> 6.68
+        \textbf{FANTA} \> \textbf{004900003073 F} \> \textbf{6.68}
     \end{tabbing}
 
     \begin{tabbing}
         \hspace{5cm} \= \kill
-        SUBTOTAL \> 6.68\\
-        TAX 1 \hspace{.5cm} 7\% \> 0.47\\
-        TOTAL \> 6.68\\
-        AMEX CREDIT TEND \> 7.15\\
-    """ + amex_number + r"""\\
-        CHANGE DUE \hspace{0.5cm} \> 0.00\\
+        \textbf{SUBTOTAL} \> \textbf{6.68}\\
+        \textbf{TAX 1} \hspace{1cm} \textbf{7\%} \> \textbf{0.47}\\
+        \textbf{TOTAL} \> \textbf{7.15}\\
+        \textbf{AMEX CREDIT TEND} \> \textbf{7.43}\\
+        \textbf{AMEX} \hspace{0.9cm} \textbf{**** **** **** """ + amex_number + r"""}\\
+        \textbf{CHANGE DUE} \hspace{0.5cm} \> \textbf{0.00}\\
     \end{tabbing}
 
     \vspace{10pt}
-    {\LARGE \textbf{\# ITEMS SOLD 1}}\\
+    \textbf{\# ITEMS SOLD 1}\\
     \vspace{10pt}
 
-    """ + tc_number + r"""\\
+    \textbf{TC\# """ + tc_number + r"""}\\
     \vspace{5pt}
 
-    % Include the barcode image
     \includegraphics[width=\linewidth]{barcode.png}
 
-    \vspace{5pt}
 
-    """ + random_date + r"""\\
+    \textbf{""" + random_date + r"""}\\
     \vspace{10pt}
 \end{center}
 
@@ -85,8 +84,12 @@ def create_receipt_latex(tc_number, st_number, random_date, amex_number):
         f.write(receipt_template)
 
 
+
+
 def compile_latex_to_png():
-    # Compile LaTeX to PDF
+    # Compile LaTeX to PDF       #\includegraphics[width=\linewidth]{Header.png}
+  #\includegraphics[width=\linewidth]{barcode.png}
+
     subprocess.run(["pdflatex", "receipt.tex"], check=True)
 
     # Convert PDF to PNG
