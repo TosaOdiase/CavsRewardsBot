@@ -1,5 +1,6 @@
 import csv
 import os
+import re
 import time
 import random
 import subprocess
@@ -7,12 +8,13 @@ import pandas as pd
 from faker import Faker
 from datetime import datetime, timedelta
 from playwright.sync_api import Playwright, sync_playwright
+from openpyxl.styles import PatternFill
+import openpyxl
 
 catchall = "gmail.com"
 
 def load_proxies(csv_file):
     """Load proxies from a CSV file."""
-    time.sleep(1.5)
     if not os.path.exists(csv_file):
         print(f"Error: The file '{csv_file}' does not exist.")
         return []
@@ -27,12 +29,10 @@ def load_proxies(csv_file):
                     "username": row[2],
                     "password": row[3]
                 })
-    time.sleep(1.5)
     return proxies
 
 def get_proxy_config(proxies):
     """Get a random proxy configuration if proxies are provided."""
-    time.sleep(1.5)
     if proxies:
         proxy = random.choice(proxies)
         return {
@@ -42,11 +42,36 @@ def get_proxy_config(proxies):
         }
     return None
 
-def log_stats_to_excel(account_number, email, password, success, alr_processed):
+def apply_conditional_formatting(file_name):
+    """Apply conditional formatting to the Status column."""
+    wb = openpyxl.load_workbook(file_name)
+    ws = wb.active
+
+    # Find the "Status" column
+    status_col = None
+    for idx, cell in enumerate(ws[1], start=1):
+        if cell.value == "Status":
+            status_col = idx
+            break
+
+    if status_col:
+        green_fill = PatternFill(start_color="00FF00", end_color="00FF00", fill_type="solid")  # Green
+        red_fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")  # Red
+
+        for row in ws.iter_rows(min_row=2, min_col=status_col, max_col=status_col):
+            for cell in row:
+                if cell.value == "Active":
+                    cell.fill = green_fill
+                elif cell.value == "Not Active":
+                    cell.fill = red_fill
+
+    wb.save(file_name)
+
+
+def log_stats_to_excel(account_number, email, password, success, alr_processed, points=None, status="Active"):
     """Log or update stats in the account stats Excel file."""
-    time.sleep(1.5)
     file_name = "account_stats.xlsx"
-    columns = ["Account Number", "Email", "Password", "Success", "Already Processed"]
+    columns = ["Account Number", "Email", "Password", "Success", "Already Processed", "Points", "Status", "Frequency Count"]
 
     # Check if the file exists and has the correct columns
     if os.path.exists(file_name):
@@ -59,19 +84,55 @@ def log_stats_to_excel(account_number, email, password, success, alr_processed):
 
     # Update existing stats or add new ones
     if email in df["Email"].values:
+        current_freq_count = df.loc[df["Email"] == email, "Frequency Count"].fillna(1).iloc[0]
+        if points is not None:
+            current_points = df.loc[df["Email"] == email, "Points"].fillna(0).iloc[0]
+            point_difference = (points - current_points)
+
+            # Apply points difference rules
+            if point_difference > 500 or point_difference == 0:
+                status = "Not Active"
+            else:
+                status = "Active"
+
+            # Increment frequency count for active accounts
+            if status == "Active" and current_freq_count >= 1:
+                current_freq_count += 1
+                
+            if current_freq_count == 3 and status == "Active":
+                current_freq_count = 0
+                status = "Not Active"  # Mark account as inactive after 3 iterations
+            elif current_freq_count == 0 and status == "Not Active":
+                status = "Active"
+                current_freq_count = 1
+
+            # Update Points, Status, and Frequency Count in the DataFrame
+            df.loc[df["Email"] == email, "Points"] = points
+            df.loc[df["Email"] == email, "Status"] = status
+            df.loc[df["Email"] == email, "Frequency Count"] = current_freq_count
+
         df.loc[df["Email"] == email, "Success"] += success
         df.loc[df["Email"] == email, "Already Processed"] += alr_processed
     else:
+        # Add a new row for accounts not already in the DataFrame
         new_row = {
             "Account Number": account_number,
             "Email": email,
             "Password": password,
             "Success": success,
             "Already Processed": alr_processed,
+            "Points": points,
+            "Status": status,
+            "Frequency Count": 1  # Default frequency count
         }
         df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
 
+    # Save the updated DataFrame to Excel
     df.to_excel(file_name, index=False)
+
+    # Apply conditional formatting for status
+    apply_conditional_formatting(file_name)
+
 
 def escape_latex(text):
     """Escape LaTeX special characters."""
@@ -194,48 +255,47 @@ def compile_latex_to_png():
 
 def create_account(playwright: Playwright, accounts: list, account_number, proxies):
     """Create an account on Cavs Rewards."""
-    time.sleep(1.5)
     proxy_config = get_proxy_config(proxies)
     browser = playwright.chromium.launch(headless=False, proxy=proxy_config)
     context = browser.new_context()
     page = context.new_page()
 
     page.goto("https://www.cavsrewards.com/")
-    time.sleep(.5)
+    time.sleep(.7)
     page.get_by_placeholder("Referral Code (optional)").click()
-    time.sleep(.5)
+    time.sleep(0.7)
     page.get_by_placeholder("Referral Code (optional)").fill("BJjPn")
-    time.sleep(.5)
+    time.sleep(0.7)
     page.get_by_role("button", name="Continue to Cavs Rewards").click()
-    time.sleep(.5)
+    time.sleep(0.7)
     page.get_by_role("link", name="Create account now").click()
 
     email = f"{Faker().last_name()}{random.randint(1000, 9999)}@{catchall}"
     password = f"Pass{random.randint(1000, 9999)}{Faker().word()}!"
 
-    time.sleep(.5)
+    time.sleep(0.7)
     page.get_by_label("Email address").click()
-    time.sleep(.5)
+    time.sleep(0.7)
     page.get_by_label("Email address").fill(email)
-    time.sleep(.5)
+    time.sleep(0.7)
     page.get_by_label("Password").click()
-    time.sleep(.5)
+    time.sleep(0.7)
     page.get_by_label("Password").fill(password)
-    time.sleep(.5)
+    time.sleep(0.7)
     page.get_by_role("button", name="Continue", exact=True).click()
-    time.sleep(.5)
+    time.sleep(0.7)
     page.get_by_role("button", name="GET STARTED").click()
-    time.sleep(.5)
+    time.sleep(0.7)
     page.get_by_role("button", name="Continue").click()
-    time.sleep(.5)
+    time.sleep(0.7)
     page.get_by_role("button", name="Continue").click()
-    time.sleep(.5)
+    time.sleep(0.7)
     page.get_by_role("button", name="Continue").click()
-    time.sleep(.5)
+    time.sleep(0.7)
     page.get_by_role("button", name="Continue").click()
-    time.sleep(.5)
+    time.sleep(0.7)
     page.locator("svg").click()
-    time.sleep(.5)
+    time.sleep(0.7)
     page.get_by_role("button", name="Done").click()
 
     # Add success and alr_processed counters to the account details
@@ -256,44 +316,72 @@ def create_account(playwright: Playwright, accounts: list, account_number, proxi
 
 def login_and_upload_receipt(playwright, account, receipt_path, proxies):
     """Log into an account and upload receipt."""
-    time.sleep(.5)
     proxy_config = get_proxy_config(proxies)
     browser = playwright.chromium.launch(headless=False, proxy=proxy_config)
     context = browser.new_context()
     page = context.new_page()
 
+    # Load account stats
+    file_name = "account_stats.xlsx"
+    df = pd.read_excel(file_name)
+    account_status = df.loc[df["Email"] == account["email"], "Status"].iloc[0]
+
+    # If the account is not active, set it to active and skip this iteration
+    if account_status == "Not Active":
+        print(f"Account {account['email']} is not active. Resetting status to Active and skipping.")
+        df.loc[df["Email"] == account["email"], "Status"] = "Active"
+        df.to_excel(file_name, index=False)
+        context.close()
+        browser.close()
+        return
+    
     page.goto("https://www.cavsrewards.com/auth")
     page.get_by_placeholder("Referral Code (optional)").click()
-    time.sleep(.5)
+    time.sleep(0.7)
     page.get_by_placeholder("Referral Code (optional)").fill("BJjPn")
-    time.sleep(.5)
+    time.sleep(0.7)
     page.get_by_role("button", name="Continue to Cavs Rewards").click()
-    time.sleep(.5)
+    time.sleep(0.7)
     page.get_by_label("Email address").fill(account["email"])
-    time.sleep(.5)
+    time.sleep(0.7)
     page.get_by_label("Password").fill(account["password"])
-    time.sleep(.5)
+    time.sleep(0.7)
     page.get_by_role("button", name="Continue", exact=True).click()
-    time.sleep(.5)
+    time.sleep(0.7)
     page.get_by_role("img", name="Close").click()
-    time.sleep(.5)
+    time.sleep(0.7)
     page.get_by_role("link", name="Card Top Coca-Cola Products").click()
-    time.sleep(.5)
+    time.sleep(0.7)
     page.locator('input[type="file"]').set_input_files(receipt_path)
-    time.sleep(.5)
+    time.sleep(0.7)
     page.get_by_role("button", name="Check").click()
-    time.sleep(5)
+    time.sleep(15)
+    page.get_by_role("img", name="Close").click()
+    time.sleep(0.7)
+    page.get_by_role("link", name="Rewards").click()
+    time.sleep(8)
+    # Check if the text "Lifetime:" exists in the body
+    assert "Lifetime:" in page.locator("body").text_content(), "Text 'Lifetime:' not found on the page"
+       # Retrieve the text content of the <body>
+     # Extract points
+    body_text = page.locator("body").text_content()
+    points = None
+    if "Lifetime:" in body_text:
+        matches = re.findall(r"Lifetime:\s*([\d,]+)", body_text)
+        if matches:
+            points = int(matches[0].replace(",", ""))
+            print(f"Account points for {account['email']}: {points}")
 
-    try:
-        if page.get_by_role("img", name="Receipt Approved").is_visible():
-            account["success"] += 1  # Increment success for this account
-        elif page.locator("[id=\"\\31 \"]").text_content() == "This receipt has already been processed. Please upload a different receipt. Try smoothing out the receipt if necessary, and try again.":
-            account["alr_processed"] += 1  # Increment alr_processed for this account
-        else:
-            raise Exception("Unhandled condition encountered.")
-    except Exception as e:
-        print(f"An exception occurred: {e}")
-
+    # Update stats
+    log_stats_to_excel(
+        account_number=account["account_number"],
+        email=account["email"],
+        password=account["password"],
+        success=account["success"],
+        alr_processed=account["alr_processed"],
+        points=points
+    )
+    
     context.close()
     browser.close()
 
@@ -304,7 +392,7 @@ def main():
 
     with sync_playwright() as playwright:
         # Step 1: Create 5 accounts
-        for i in range(1, 6):
+        for i in range(1, 10):
             create_account(playwright, accounts, i, proxies)
 
         while True:
