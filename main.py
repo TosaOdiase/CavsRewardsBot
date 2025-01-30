@@ -8,39 +8,46 @@ import pandas as pd
 from faker import Faker
 from datetime import datetime, timedelta
 from playwright.sync_api import Playwright, sync_playwright
+from playwright.sync_api import expect
+from undetected_playwright import stealth_sync
 from openpyxl.styles import PatternFill
 import openpyxl
 
 catchall = "gmail.com"
 
+
 def load_proxies(csv_file):
-    """Load proxies from a CSV file."""
+    """Load proxies from a CSV file and return them as a list."""
     if not os.path.exists(csv_file):
         print(f"Error: The file '{csv_file}' does not exist.")
         return []
 
     proxies = []
-    with open(csv_file, 'r') as file:
+    with open(csv_file, 'r', newline='', encoding='utf-8') as file:
         reader = csv.reader(file)
         for row in reader:
-            if len(row) == 4:
+            if len(row) == 4:  # Ensure row has exactly 4 elements
                 proxies.append({
                     "server": f"http://{row[0]}:{row[1]}",
                     "username": row[2],
                     "password": row[3]
                 })
+            else:
+                print(f"Skipping invalid row: {row}")  # Log invalid rows
     return proxies
 
-def get_proxy_config(proxies):
-    """Get a random proxy configuration if proxies are provided."""
-    if proxies:
-        proxy = random.choice(proxies)
-        return {
-            "server": proxy["server"],
-            "username": proxy["username"],
-            "password": proxy["password"]
-        }
-    return None
+def assign_proxies_to_accounts(accounts, proxies):
+    """Assign proxies to accounts when they are created or first logged into."""
+    assigned_proxies = {}
+
+    # Assign proxies to newly created accounts
+    for i, account in enumerate(accounts):
+        if "proxy" not in account or account["proxy"] is None:  # Assign only if not already set
+            proxy_index = i % len(proxies)  # Rotate proxies if more accounts than proxies
+            assigned_proxies[account["email"]] = proxies[proxy_index]
+
+    print(f"[DEBUG] Assigned Proxies: {assigned_proxies}")  # Debugging to check proxy assignment
+    return assigned_proxies
 
 def apply_conditional_formatting(file_name):
     """Apply conditional formatting to the Status column."""
@@ -73,7 +80,7 @@ def log_stats_to_excel(account_number, email, password, success, alr_processed, 
     file_name = "account_stats.xlsx"
     columns = ["Account Number", "Email", "Password", "Success", "Already Processed", "Points", "Status", "Frequency Count"]
 
-    # Check if the file exists and has the correct columns
+    # Check if file exists and load data
     if os.path.exists(file_name):
         df = pd.read_excel(file_name)
         if not all(col in df.columns for col in columns):
@@ -85,34 +92,45 @@ def log_stats_to_excel(account_number, email, password, success, alr_processed, 
     # Update existing stats or add new ones
     if email in df["Email"].values:
         current_freq_count = df.loc[df["Email"] == email, "Frequency Count"].fillna(1).iloc[0]
+        current_status = df.loc[df["Email"] == email, "Status"].iloc[0]
+
         if points is not None:
             current_points = df.loc[df["Email"] == email, "Points"].fillna(0).iloc[0]
-            point_difference = (points - current_points)
+            point_difference = points - current_points
 
-            # Apply points difference rules
-            if point_difference > 500 or point_difference == 0:
+            # **🔹 Check for inactivity**
+            if point_difference > 500:
                 status = "Not Active"
+            elif point_difference == 0:
+                alr_processed += 1  # Increment already processed
+                status = "Not Active"
+            elif point_difference > 1:
+                success += 1  # Increment success
             else:
-                status = "Active"
+                status = "Active"   
 
-            # Increment frequency count for active accounts
-            if status == "Active" and current_freq_count >= 1:
-                current_freq_count += 1
-                
-            if current_freq_count == 3 and status == "Active":
+            # **🔹 Track frequency count properly**
+            if current_status == "Active":
+                current_freq_count += 1  # Increment only if active
+
+            # **🔹 Make account inactive after 3 cycles**
+            if current_freq_count >= 3 and status == "Active":
+                print(f"[INFO] Account {email} reached max cycles. Setting to Not Active.")
                 current_freq_count = 0
-                status = "Not Active"  # Mark account as inactive after 3 iterations
-            elif current_freq_count == 0 and status == "Not Active":
-                status = "Active"
-                current_freq_count = 1
+                status = "Not Active"  
+            elif current_status == "Not Active":
+                print(f"[INFO] Account {email} is inactive, keeping it inactive.")
+                status = "Not Active"  # Keep it inactive
 
-            # Update Points, Status, and Frequency Count in the DataFrame
+            # **🔹 Update Points, Status, and Frequency Count**
             df.loc[df["Email"] == email, "Points"] = points
             df.loc[df["Email"] == email, "Status"] = status
             df.loc[df["Email"] == email, "Frequency Count"] = current_freq_count
 
+        # **🔹 Update success & already processed counts**
         df.loc[df["Email"] == email, "Success"] += success
         df.loc[df["Email"] == email, "Already Processed"] += alr_processed
+
     else:
         # Add a new row for accounts not already in the DataFrame
         new_row = {
@@ -123,15 +141,16 @@ def log_stats_to_excel(account_number, email, password, success, alr_processed, 
             "Already Processed": alr_processed,
             "Points": points,
             "Status": status,
-            "Frequency Count": 1  # Default frequency count
+            "Frequency Count": 1  # Start at 1
         }
         df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
 
-    # Save the updated DataFrame to Excel
+    # **🔹 Save updates to Excel**
     df.to_excel(file_name, index=False)
 
-    # Apply conditional formatting for status
+    # **🔹 Apply conditional formatting**
     apply_conditional_formatting(file_name)
+
 
 
 def escape_latex(text):
@@ -253,12 +272,32 @@ def compile_latex_to_png():
         return False
     return True
 
-def create_account(playwright: Playwright, accounts: list, account_number, proxies):
-    """Create an account on Cavs Rewards."""
-    proxy_config = get_proxy_config(proxies)
-    browser = playwright.chromium.launch(headless=False, proxy=proxy_config)
+def create_account(playwright, accounts, account_number, proxies, assigned_proxies):
+    """Create an account on Cavs Rewards and assign a proxy to it."""
+    
+    # ✅ Generate the email FIRST before assigning a proxy
+    email = f"{Faker().last_name()}{random.randint(1000, 9999)}@{catchall}"
+    password = f"Pass{random.randint(1000, 9999)}{Faker().word()}!"
+
+    # ✅ Assign a proxy AFTER email is created
+    proxy_index = len(accounts) % len(proxies)  
+    assigned_proxies[email] = proxies[proxy_index]  # Now 'email' exists
+
+    proxy_config = assigned_proxies[email]  # Use assigned proxy
+
+    # ✅ Debugging print statement to check proxy assignment
+    print(f"[INFO] Creating Account {email} using Proxy: {proxy_config}")
+    
+     # Use assigned proxy
+    browser = playwright.chromium.launch(
+        headless=False,
+        proxy=proxy_config
+    )
     context = browser.new_context()
     page = context.new_page()
+
+    # Apply stealth to avoid bot detection
+    stealth_sync(page)
 
     page.goto("https://www.cavsrewards.com/")
     time.sleep(.7)
@@ -314,12 +353,23 @@ def create_account(playwright: Playwright, accounts: list, account_number, proxi
     browser.close()
     print(f"Account created: {email}")
 
-def login_and_upload_receipt(playwright, account, receipt_path, proxies):
+def login_and_upload_receipt(playwright, account, receipt_path, assigned_proxies, proxies):
     """Log into an account and upload receipt."""
-    proxy_config = get_proxy_config(proxies)
+    email = account["email"]
+    
+    # Assign a proxy if this account doesn't have one yet
+    if email not in assigned_proxies:
+        proxy_index = len(assigned_proxies) % len(proxies)  # Assign sequentially
+        assigned_proxies[email] = proxies[proxy_index]
+
+    proxy_config = assigned_proxies[email]
+
     browser = playwright.chromium.launch(headless=False, proxy=proxy_config)
     context = browser.new_context()
     page = context.new_page()
+
+    # Ensure Stealth is applied to bypass detection
+    stealth_sync(page) 
 
     # Load account stats
     file_name = "account_stats.xlsx"
@@ -348,6 +398,26 @@ def login_and_upload_receipt(playwright, account, receipt_path, proxies):
     time.sleep(0.7)
     page.get_by_role("button", name="Continue", exact=True).click()
     time.sleep(0.7)
+
+    try:
+        expect(page.get_by_role("button", name="GET STARTED")).to_be_visible(timeout=2000)
+        print("[INFO] 'GET STARTED' button found! Clicking now...")
+        page.get_by_role("button", name="GET STARTED").click()
+        time.sleep(0.7)
+        page.get_by_role("button", name="Continue").click()
+        time.sleep(0.7)
+        page.get_by_role("button", name="Continue").click()
+        time.sleep(0.7)
+        page.get_by_role("button", name="Continue").click()
+        time.sleep(0.7)
+        page.get_by_role("button", name="Continue").click()
+        time.sleep(0.7)
+        page.locator("svg").click()
+        time.sleep(0.7)
+        page.get_by_role("button", name="Done").click()
+    except:
+        print("[WARNING] 'GET STARTED' not found. Continuing without it.")
+        
     page.get_by_role("img", name="Close").click()
     time.sleep(0.7)
     page.get_by_role("link", name="Card Top Coca-Cola Products").click()
@@ -361,10 +431,10 @@ def login_and_upload_receipt(playwright, account, receipt_path, proxies):
     page.get_by_role("link", name="Rewards").click()
     time.sleep(8)
     # Check if the text "Lifetime:" exists in the body
-    assert "Lifetime:" in page.locator("body").text_content(), "Text 'Lifetime:' not found on the page"
-       # Retrieve the text content of the <body>
-     # Extract points
     body_text = page.locator("body").text_content()
+    assert "Lifetime:" in page.locator("body").text_content(), "Text 'Lifetime:' not found on the page"
+    # Retrieve the text content of the <body>
+    # Extract points
     points = None
     if "Lifetime:" in body_text:
         matches = re.findall(r"Lifetime:\s*([\d,]+)", body_text)
@@ -386,45 +456,58 @@ def login_and_upload_receipt(playwright, account, receipt_path, proxies):
     browser.close()
 
 def main():
-    """Main function to create accounts, generate receipts, and log statistics."""
-    accounts = []
+    """Main function to create or log into accounts with assigned proxies."""
     proxies = load_proxies("proxies.csv")
+    file_name = "account_stats.xlsx"
+    accounts = []
+
+    # Load existing accounts
+    if os.path.exists(file_name):
+        df = pd.read_excel(file_name)
+        if not df.empty:
+            for _, row in df.iterrows():
+                accounts.append({
+                    "account_number": row["Account Number"],
+                    "email": row["Email"],
+                    "password": row["Password"],
+                    "success": row["Success"],
+                    "alr_processed": row["Already Processed"]
+                })
+    
+    # Assign proxies (either at creation or when logging in)
+    assigned_proxies = assign_proxies_to_accounts(accounts, proxies)
 
     with sync_playwright() as playwright:
-        # Step 1: Create 5 accounts
-        for i in range(1, 10):
-            create_account(playwright, accounts, i, proxies)
+        # If no accounts exist, create them
+        if not accounts:
+            print("[INFO] No existing accounts found. Creating new accounts...")
+            for i in range(1, 6):  # Create up to 5 accounts
+                create_account(playwright, accounts, i, proxies, assigned_proxies)
+                time.sleep(random.uniform(2, 5))
+
+        else:
+            print("[INFO] Using existing accounts for login and receipt upload.")
 
         while True:
-            # Step 2: Iterate through accounts
             for account in accounts:
-                account_number = account["account_number"]
                 email = account["email"]
-                password = account["password"]
+                print(f"[INFO] Processing account {email}...")
 
-                # Generate a receipt before each login
+                if email not in assigned_proxies:
+                    print(f"[ERROR] No proxy assigned for {email}. Assigning now...")
+                    assigned_proxies[email] = proxies[len(assigned_proxies) % len(proxies)]
+
+                # Generate and upload receipt
                 tc_number, st_number, random_date, amex_number, items, subtotal, tax1, total = generate_random_receipt()
-                logo_path = "Header.png"
-                barcode_path = "barcode.png"
-                
-                # Create receipt LaTeX file and compile it into PNG
-                create_receipt_latex(tc_number, st_number, random_date, amex_number, items, subtotal, tax1, total, logo_path, barcode_path)
+                create_receipt_latex(tc_number, st_number, random_date, amex_number, items, subtotal, tax1, total, "Header.png", "barcode.png")
+
                 if compile_latex_to_png():
                     receipt_path = "receipt.png"
+                    login_and_upload_receipt(playwright, account, receipt_path, assigned_proxies, proxies)
                 else:
-                    print("Failed to generate receipt. Skipping this account.")
-                    continue
+                    print(f"[ERROR] Failed to generate receipt for {email}. Skipping.")
 
-                # Log in and upload the generated receipt
-                login_and_upload_receipt(playwright, account, receipt_path, proxies)
-
-                print(f"Processing account {email}: Success={account['success']}, Already Processed={account['alr_processed']}")
-
-                # Log stats to Excel
-                log_stats_to_excel(
-                    account_number, email, password, account["success"], account["alr_processed"]
-                )
-
+                time.sleep(random.uniform(5, 15))
 
 if __name__ == "__main__":
     main()
