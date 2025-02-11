@@ -4,154 +4,10 @@ import re
 import time
 import random
 import subprocess
-import pandas as pd
-from faker import Faker
 from datetime import datetime, timedelta
-from playwright.sync_api import Playwright, sync_playwright
-from playwright.sync_api import expect
-from undetected_playwright import stealth_sync
-from openpyxl.styles import PatternFill
-import openpyxl
-
-catchall = "gmail.com"
-
-
-def load_proxies(csv_file):
-    """Load proxies from a CSV file and return them as a list."""
-    if not os.path.exists(csv_file):
-        print(f"Error: The file '{csv_file}' does not exist.")
-        return []
-
-    proxies = []
-    with open(csv_file, 'r', newline='', encoding='utf-8') as file:
-        reader = csv.reader(file)
-        for row in reader:
-            if len(row) == 4:  # Ensure row has exactly 4 elements
-                proxies.append({
-                    "server": f"http://{row[0]}:{row[1]}",
-                    "username": row[2],
-                    "password": row[3]
-                })
-            else:
-                print(f"Skipping invalid row: {row}")  # Log invalid rows
-    return proxies
-
-def assign_proxies_to_accounts(accounts, proxies):
-    """Assign proxies to accounts when they are created or first logged into."""
-    assigned_proxies = {}
-
-    # Assign proxies to newly created accounts
-    for i, account in enumerate(accounts):
-        if "proxy" not in account or account["proxy"] is None:  # Assign only if not already set
-            proxy_index = i % len(proxies)  # Rotate proxies if more accounts than proxies
-            assigned_proxies[account["email"]] = proxies[proxy_index]
-
-    print(f"[DEBUG] Assigned Proxies: {assigned_proxies}")  # Debugging to check proxy assignment
-    return assigned_proxies
-
-def apply_conditional_formatting(file_name):
-    """Apply conditional formatting to the Status column."""
-    wb = openpyxl.load_workbook(file_name)
-    ws = wb.active
-
-    # Find the "Status" column
-    status_col = None
-    for idx, cell in enumerate(ws[1], start=1):
-        if cell.value == "Status":
-            status_col = idx
-            break
-
-    if status_col:
-        green_fill = PatternFill(start_color="00FF00", end_color="00FF00", fill_type="solid")  # Green
-        red_fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")  # Red
-
-        for row in ws.iter_rows(min_row=2, min_col=status_col, max_col=status_col):
-            for cell in row:
-                if cell.value == "Active":
-                    cell.fill = green_fill
-                elif cell.value == "Not Active":
-                    cell.fill = red_fill
-
-    wb.save(file_name)
-
-
-def log_stats_to_excel(account_number, email, password, success, alr_processed, points=None, status="Active"):
-    """Log or update stats in the account stats Excel file."""
-    file_name = "account_stats.xlsx"
-    columns = ["Account Number", "Email", "Password", "Success", "Already Processed", "Points", "Status", "Frequency Count"]
-
-    # Check if file exists and load data
-    if os.path.exists(file_name):
-        df = pd.read_excel(file_name)
-        if not all(col in df.columns for col in columns):
-            print(f"Warning: The file '{file_name}' has incorrect or missing columns. Recreating it.")
-            df = pd.DataFrame(columns=columns)
-    else:
-        df = pd.DataFrame(columns=columns)
-
-    # Update existing stats or add new ones
-    if email in df["Email"].values:
-        current_freq_count = df.loc[df["Email"] == email, "Frequency Count"].fillna(1).iloc[0]
-        current_status = df.loc[df["Email"] == email, "Status"].iloc[0]
-
-        if points is not None:
-            current_points = df.loc[df["Email"] == email, "Points"].fillna(0).iloc[0]
-            point_difference = points - current_points
-
-            # **🔹 Check for inactivity**
-            if point_difference > 500:
-                status = "Not Active"
-            elif point_difference == 0:
-                alr_processed += 1  # Increment already processed
-                status = "Not Active"
-            elif point_difference > 1:
-                success += 1  # Increment success
-            else:
-                status = "Active"   
-
-            # **🔹 Track frequency count properly**
-            if current_status == "Active":
-                current_freq_count += 1  # Increment only if active
-
-            # **🔹 Make account inactive after 3 cycles**
-            if current_freq_count >= 3 and status == "Active":
-                print(f"[INFO] Account {email} reached max cycles. Setting to Not Active.")
-                current_freq_count = 0
-                status = "Not Active"  
-            elif current_status == "Not Active":
-                print(f"[INFO] Account {email} is inactive, keeping it inactive.")
-                status = "Not Active"  # Keep it inactive
-
-            # **🔹 Update Points, Status, and Frequency Count**
-            df.loc[df["Email"] == email, "Points"] = points
-            df.loc[df["Email"] == email, "Status"] = status
-            df.loc[df["Email"] == email, "Frequency Count"] = current_freq_count
-
-        # **🔹 Update success & already processed counts**
-        df.loc[df["Email"] == email, "Success"] += success
-        df.loc[df["Email"] == email, "Already Processed"] += alr_processed
-
-    else:
-        # Add a new row for accounts not already in the DataFrame
-        new_row = {
-            "Account Number": account_number,
-            "Email": email,
-            "Password": password,
-            "Success": success,
-            "Already Processed": alr_processed,
-            "Points": points,
-            "Status": status,
-            "Frequency Count": 1  # Start at 1
-        }
-        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-
-    # **🔹 Save updates to Excel**
-    df.to_excel(file_name, index=False)
-
-    # **🔹 Apply conditional formatting**
-    apply_conditional_formatting(file_name)
-
-
+from patchright.async_api import async_playwright
+from faker import Faker
+import asyncio
 
 def escape_latex(text):
     """Escape LaTeX special characters."""
@@ -272,242 +128,207 @@ def compile_latex_to_png():
         return False
     return True
 
-def create_account(playwright, accounts, account_number, proxies, assigned_proxies):
-    """Create an account on Cavs Rewards and assign a proxy to it."""
-    
-    # ✅ Generate the email FIRST before assigning a proxy
-    email = f"{Faker().last_name()}{random.randint(1000, 9999)}@{catchall}"
-    password = f"Pass{random.randint(1000, 9999)}{Faker().word()}!"
-
-    # ✅ Assign a proxy AFTER email is created
-    proxy_index = len(accounts) % len(proxies)  
-    assigned_proxies[email] = proxies[proxy_index]  # Now 'email' exists
-
-    proxy_config = assigned_proxies[email]  # Use assigned proxy
-
-    # ✅ Debugging print statement to check proxy assignment
-    print(f"[INFO] Creating Account {email} using Proxy: {proxy_config}")
-    
-     # Use assigned proxy
-    browser = playwright.chromium.launch(
-        headless=False,
-        proxy=proxy_config
-    )
-    context = browser.new_context()
-    page = context.new_page()
-
-    # Apply stealth to avoid bot detection
-    stealth_sync(page)
-
-    page.goto("https://www.cavsrewards.com/")
-    time.sleep(.7)
-    page.get_by_placeholder("Referral Code (optional)").click()
-    time.sleep(0.7)
-    page.get_by_placeholder("Referral Code (optional)").fill("BJjPn")
-    time.sleep(0.7)
-    page.get_by_role("button", name="Continue to Cavs Rewards").click()
-    time.sleep(0.7)
-    page.get_by_role("link", name="Create account now").click()
-
-    email = f"{Faker().last_name()}{random.randint(1000, 9999)}@{catchall}"
-    password = f"Pass{random.randint(1000, 9999)}{Faker().word()}!"
-
-    time.sleep(0.7)
-    page.get_by_label("Email address").click()
-    time.sleep(0.7)
-    page.get_by_label("Email address").fill(email)
-    time.sleep(0.7)
-    page.get_by_label("Password").click()
-    time.sleep(0.7)
-    page.get_by_label("Password").fill(password)
-    time.sleep(0.7)
-    page.get_by_role("button", name="Continue", exact=True).click()
-    time.sleep(0.7)
-    page.get_by_role("button", name="GET STARTED").click()
-    time.sleep(0.7)
-    page.get_by_role("button", name="Continue").click()
-    time.sleep(0.7)
-    page.get_by_role("button", name="Continue").click()
-    time.sleep(0.7)
-    page.get_by_role("button", name="Continue").click()
-    time.sleep(0.7)
-    page.get_by_role("button", name="Continue").click()
-    time.sleep(0.7)
-    page.locator("svg").click()
-    time.sleep(0.7)
-    page.get_by_role("button", name="Done").click()
-
-    # Add success and alr_processed counters to the account details
-    account_details = {
-        "account_number": account_number,
-        "email": email,
-        "password": password,
-        "success": 0,
-        "alr_processed": 0
-    }
-    accounts.append(account_details)
-
-    log_stats_to_excel(account_number, email, password, 0, 0)
-
-    context.close()
-    browser.close()
-    print(f"Account created: {email}")
-
-def login_and_upload_receipt(playwright, account, receipt_path, assigned_proxies, proxies):
-    """Log into an account and upload receipt."""
-    email = account["email"]
-    
-    # Assign a proxy if this account doesn't have one yet
-    if email not in assigned_proxies:
-        proxy_index = len(assigned_proxies) % len(proxies)  # Assign sequentially
-        assigned_proxies[email] = proxies[proxy_index]
-
-    proxy_config = assigned_proxies[email]
-
-    browser = playwright.chromium.launch(headless=False, proxy=proxy_config)
-    context = browser.new_context()
-    page = context.new_page()
-
-    # Ensure Stealth is applied to bypass detection
-    stealth_sync(page) 
-
-    # Load account stats
-    file_name = "account_stats.xlsx"
-    df = pd.read_excel(file_name)
-    account_status = df.loc[df["Email"] == account["email"], "Status"].iloc[0]
-
-    # If the account is not active, set it to active and skip this iteration
-    if account_status == "Not Active":
-        print(f"Account {account['email']} is not active. Resetting status to Active and skipping.")
-        df.loc[df["Email"] == account["email"], "Status"] = "Active"
-        df.to_excel(file_name, index=False)
-        context.close()
-        browser.close()
-        return
-    
-    page.goto("https://www.cavsrewards.com/auth")
-    page.get_by_placeholder("Referral Code (optional)").click()
-    time.sleep(0.7)
-    page.get_by_placeholder("Referral Code (optional)").fill("BJjPn")
-    time.sleep(0.7)
-    page.get_by_role("button", name="Continue to Cavs Rewards").click()
-    time.sleep(0.7)
-    page.get_by_label("Email address").fill(account["email"])
-    time.sleep(0.7)
-    page.get_by_label("Password").fill(account["password"])
-    time.sleep(0.7)
-    page.get_by_role("button", name="Continue", exact=True).click()
-    time.sleep(0.7)
-
-    try:
-        expect(page.get_by_role("button", name="GET STARTED")).to_be_visible(timeout=2000)
-        print("[INFO] 'GET STARTED' button found! Clicking now...")
-        page.get_by_role("button", name="GET STARTED").click()
-        time.sleep(0.7)
-        page.get_by_role("button", name="Continue").click()
-        time.sleep(0.7)
-        page.get_by_role("button", name="Continue").click()
-        time.sleep(0.7)
-        page.get_by_role("button", name="Continue").click()
-        time.sleep(0.7)
-        page.get_by_role("button", name="Continue").click()
-        time.sleep(0.7)
-        page.locator("svg").click()
-        time.sleep(0.7)
-        page.get_by_role("button", name="Done").click()
-    except:
-        print("[WARNING] 'GET STARTED' not found. Continuing without it.")
-        
-    page.get_by_role("img", name="Close").click()
-    time.sleep(0.7)
-    page.get_by_role("link", name="Card Top Coca-Cola Products").click()
-    time.sleep(0.7)
-    page.locator('input[type="file"]').set_input_files(receipt_path)
-    time.sleep(0.7)
-    page.get_by_role("button", name="Check").click()
-    time.sleep(15)
-    page.get_by_role("img", name="Close").click()
-    time.sleep(0.7)
-    page.get_by_role("link", name="Rewards").click()
-    time.sleep(8)
-    # Check if the text "Lifetime:" exists in the body
-    body_text = page.locator("body").text_content()
-    assert "Lifetime:" in page.locator("body").text_content(), "Text 'Lifetime:' not found on the page"
-    # Retrieve the text content of the <body>
-    # Extract points
-    points = None
-    if "Lifetime:" in body_text:
-        matches = re.findall(r"Lifetime:\s*([\d,]+)", body_text)
-        if matches:
-            points = int(matches[0].replace(",", ""))
-            print(f"Account points for {account['email']}: {points}")
-
-    # Update stats
-    log_stats_to_excel(
-        account_number=account["account_number"],
-        email=account["email"],
-        password=account["password"],
-        success=account["success"],
-        alr_processed=account["alr_processed"],
-        points=points
-    )
-    
-    context.close()
-    browser.close()
-
-def main():
-    """Main function to create or log into accounts with assigned proxies."""
-    proxies = load_proxies("proxies.csv")
-    file_name = "account_stats.xlsx"
+def load_accounts_from_csv():
+    """Load accounts from CSV file."""
+    csv_file = "accounts.csv"
     accounts = []
-
-    # Load existing accounts
-    if os.path.exists(file_name):
-        df = pd.read_excel(file_name)
-        if not df.empty:
-            for _, row in df.iterrows():
-                accounts.append({
-                    "account_number": row["Account Number"],
-                    "email": row["Email"],
-                    "password": row["Password"],
-                    "success": row["Success"],
-                    "alr_processed": row["Already Processed"]
-                })
     
-    # Assign proxies (either at creation or when logging in)
-    assigned_proxies = assign_proxies_to_accounts(accounts, proxies)
+    if not os.path.exists(csv_file):
+        with open(csv_file, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['email', 'password', 'points', 'next_submission', 'flagged', 'proxy'])
+        return accounts
 
-    with sync_playwright() as playwright:
-        # If no accounts exist, create them
+    with open(csv_file, 'r', newline='') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            accounts.append({
+                'email': row['email'],
+                'password': row['password'],
+                'points': int(row['points']) if row['points'] else 0,
+                'next_submission': row['next_submission'] if row['next_submission'] else None,
+                'flagged': row['flagged'].lower() == 'true',
+                'proxy': row['proxy']
+            })
+    return accounts
+
+def update_account_csv(email, first_submission=False):
+    """Update account details in CSV file."""
+    accounts = []
+    csv_file = "accounts.csv"
+    
+    with open(csv_file, 'r', newline='') as f:
+        reader = csv.DictReader(f)
+        accounts = list(reader)
+    
+    current_time = datetime.now()
+    
+    for account in accounts:
+        if account['email'] == email:
+            if first_submission:
+                account['next_submission'] = (current_time + timedelta(hours=48)).strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                account['next_submission'] = (current_time + timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+    
+    with open(csv_file, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=['email', 'password', 'points', 'next_submission', 'flagged', 'proxy'])
+        writer.writeheader()
+        writer.writerows(accounts)
+
+
+async def login_and_upload_receipt(playwright, account, receipt_path):
+    """Modified login and upload receipt function using async/await."""
+    email = account["email"]
+    proxy_config = None
+    
+    if account['proxy'] and account['proxy'].strip():  # Check if proxy exists and isn't empty
+        try:
+            proxy_parts = account['proxy'].split(':')
+            if len(proxy_parts) == 4:  # Format: host:port:username:password
+                host, port, username, password = proxy_parts
+                proxy_config = {
+                    "server": f"http://{host}:{port}",
+                    "username": username,
+                    "password": password
+                }
+                print(f"[INFO] Using proxy for {email}: {host}:{port}")
+            elif len(proxy_parts) == 2:  # Format: host:port
+                host, port = proxy_parts
+                proxy_config = {
+                    "server": f"http://{host}:{port}"
+                }
+                print(f"[INFO] Using proxy without auth for {email}: {host}:{port}")
+            else:
+                print(f"[WARNING] Invalid proxy format for {email}. Expected host:port:username:password or host:port")
+        except Exception as e:
+            print(f"[WARNING] Invalid proxy format for {email}: {e}")
+
+    browser = await playwright.chromium.launch(
+        headless=False,  # Changed to True for stability
+        proxy=proxy_config if proxy_config else None,
+        args=[
+            '--disable-dev-shm-usage',
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-gpu',
+            '--disable-software-rasterizer',
+            '--disable-extensions',
+            '--disable-application-cache',
+            '--disable-offline-load-stale-cache',
+            '--disk-cache-size=0'
+        ]
+    )
+    
+    context = await browser.new_context(
+        viewport={'width': 1920, 'height': 1080},
+        user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        ignore_https_errors=True,  # Add this if you have SSL issues
+        java_script_enabled=True
+    )
+    
+    try:
+        page = await context.new_page()        
+        await page.goto("https://www.cavsrewards.com/auth")
+        await page.wait_for_load_state("networkidle")
+        
+        continue_button = page.get_by_role("button", name="Continue to Cavs Rewards")
+        await continue_button.wait_for(state="visible", timeout=30000)
+        await continue_button.click()
+        
+        email_input = page.get_by_label("Email address")
+        await email_input.wait_for(state="visible", timeout=30000)
+        await email_input.fill(account["email"])
+        
+        password_input = page.get_by_label("Password")
+        await password_input.wait_for(state="visible", timeout=30000)
+        await password_input.fill(account["password"])
+        
+        continue_btn = page.get_by_role("button", name="Continue", exact=True)
+        await continue_btn.wait_for(state="visible", timeout=30000)
+        await continue_btn.click()
+        
+        await page.goto("https://www.cavsrewards.com/earn/coca-cola-products")
+        await page.wait_for_load_state("networkidle")
+        
+        upload_btn = page.get_by_role("button", name="Upload Receipt")
+        await upload_btn.wait_for(state="visible", timeout=30000)
+        
+        async with page.expect_file_chooser() as fc_info:
+            await upload_btn.dblclick()
+        file_chooser = await fc_info.value
+        await file_chooser.set_files(receipt_path)
+        
+        submit_btn = page.get_by_role("button", name="Check")
+        await submit_btn.wait_for(state="visible", timeout=30000)
+        await submit_btn.click()
+        await page.wait_for_load_state("networkidle")
+        await asyncio.sleep(3000) 
+        
+        await page.goto("https://www.cavsrewards.com/profile")
+        await page.wait_for_load_state("networkidle")
+        await asyncio.sleep(3000) 
+        await page.wait_for_function('document.body.textContent.includes("Lifetime:")', timeout=30000)
+        body_text = await page.locator("body").text_content()
+        
+        points = None
+        if "Lifetime:" in body_text:
+            matches = re.findall(r"Lifetime:\s*([\d,]+)", body_text)
+            if matches:
+                points = int(matches[0].replace(",", ""))
+                print(f"Account points for {email}: {points}")
+                update_account_csv(email, points=points)
+                print(f"Updated points for {email}: {points}")
+
+    except Exception as e:
+        print(f"Error processing account {email}: {e}")
+        update_account_csv(email, flagged=True)
+    finally:
+        await context.close()
+        await browser.close()
+
+async def main():
+    while True:
+        accounts = load_accounts_from_csv()
+        
         if not accounts:
-            print("[INFO] No existing accounts found. Creating new accounts...")
-            for i in range(1, 6):  # Create up to 5 accounts
-                create_account(playwright, accounts, i, proxies, assigned_proxies)
-                time.sleep(random.uniform(2, 5))
-
+            print("[INFO] No accounts found in CSV.")
+            return
+        
+        current_time = datetime.now()
+        
+        # Prioritize accounts with no next_submission time
+        no_submission_accounts = [acc for acc in accounts if not acc['next_submission'] and not acc['flagged']]
+        
+        if no_submission_accounts:
+            account = no_submission_accounts[0]
         else:
-            print("[INFO] Using existing accounts for login and receipt upload.")
+            # Select accounts whose next_submission is due
+            accounts.sort(key=lambda x: datetime.strptime(x['next_submission'], "%Y-%m-%d %H:%M:%S") if x['next_submission'] else datetime.min)
+            account = next((acc for acc in accounts if not acc['flagged'] and datetime.strptime(acc['next_submission'], "%Y-%m-%d %H:%M:%S") <= current_time), None)
+        
+        if not account:
+            print("[INFO] No accounts ready for submission. Sleeping for 1 hour...")
+            await asyncio.sleep(3600)  # Wait 1 hour before checking again
+            continue
+        
+        print(f"[INFO] Processing account {account['email']}...")
+        
+        async with async_playwright() as playwright:
+            # Generate and upload receipt
+            tc_number, st_number, random_date, amex_number, items, subtotal, tax1, total = generate_random_receipt()
+            create_receipt_latex(tc_number, st_number, random_date, amex_number, items, subtotal, tax1, total, "Header.png", "barcode.png")
 
-        while True:
-            for account in accounts:
-                email = account["email"]
-                print(f"[INFO] Processing account {email}...")
-
-                if email not in assigned_proxies:
-                    print(f"[ERROR] No proxy assigned for {email}. Assigning now...")
-                    assigned_proxies[email] = proxies[len(assigned_proxies) % len(proxies)]
-
-                # Generate and upload receipt
-                tc_number, st_number, random_date, amex_number, items, subtotal, tax1, total = generate_random_receipt()
-                create_receipt_latex(tc_number, st_number, random_date, amex_number, items, subtotal, tax1, total, "Header.png", "barcode.png")
-
-                if compile_latex_to_png():
-                    receipt_path = "receipt.png"
-                    login_and_upload_receipt(playwright, account, receipt_path, assigned_proxies, proxies)
-                else:
-                    print(f"[ERROR] Failed to generate receipt for {email}. Skipping.")
-
-                time.sleep(random.uniform(5, 15))
+            if compile_latex_to_png():
+                receipt_path = "receipt.png"
+                await login_and_upload_receipt(playwright, account, receipt_path)
+            else:
+                print(f"[ERROR] Failed to generate receipt for {account['email']}. Skipping.")
+        
+        # Update next submission time
+        update_account_csv(account['email'], first_submission=(account['next_submission'] is None))
+        
+        print("[INFO] Submission completed. Checking again in 1 hour...")
+        await asyncio.sleep(3600)  # Wait 1 hour before checking again
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
