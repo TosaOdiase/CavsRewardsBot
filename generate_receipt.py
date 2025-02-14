@@ -28,7 +28,7 @@ def generate_random_receipt():
 
     # Fixed MMZ Lemonade
     # Make a matrix for sporte packages (6-packs, 2-liters)
-    fixed_item = ("MMZ LEMONADE", "002500012052 F", random.uniform(2.50,4.50))
+    fixed_item = ("MMZ LEMONADE", "002500012052 F", random.uniform(18.00,25.00))
 
     # Randomly select 4 items excluding MMZ Lemonade
     selected_items = random.sample(list(items_dict.items()), 4)
